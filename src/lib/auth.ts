@@ -10,6 +10,10 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
     GitHub({
       clientId: process.env.GITHUB_CLIENT_ID!,
       clientSecret: process.env.GITHUB_CLIENT_SECRET!,
+      // GitHub 自 2026-04 起按 RFC 9207 在回调中返回 iss=https://github.com/login/oauth。
+      // 认证库未声明期望签发方时会用占位值 https://authjs.dev 比对，直接拒绝整次回调，
+      // 表现为"点登录后报 CallbackRouteError、无法登录"。
+      issuer: "https://github.com/login/oauth",
       authorization: {
         params: {
           scope: "read:user user:email repo",

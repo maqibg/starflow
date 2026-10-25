@@ -2,7 +2,12 @@
 # Starflow Docker Build
 # ============================================
 
-FROM node:20-alpine AS base
+# Node 20 已停止维护；22.23.4 为 2026-10-21 批漏洞（含 Brotli 越界写 RCE）的修复版本
+FROM node:22.23.4-alpine AS base
+
+# Alpine 侧 ca-certificates 需 20261020-r0 起才移除受限根与 emSign 交叉签名链；
+# 构建日志打印实际生效版本，避免用"tag 看起来新"代替实证
+RUN apk add --no-cache --upgrade ca-certificates && apk info -e ca-certificates
 
 # Install dependencies only when needed
 FROM base AS deps
