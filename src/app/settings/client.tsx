@@ -29,6 +29,8 @@ import {
   Keyboard,
   Info,
   Sparkles,
+  Clock,
+  RotateCcw,
 } from "lucide-react";
 import { getPreferences, setPreferences, UserPreferences } from "@/lib/preferences";
 import { Input } from "@/components/ui/input";
@@ -38,6 +40,15 @@ interface User {
   email?: string | null;
   image?: string | null;
   username?: string;
+}
+
+interface SnapshotItem {
+  id: string;
+  label: string;
+  listCount: number;
+  noteCount: number;
+  repoCount: number;
+  createdAt: string;
 }
 
 export function SettingsClient({ user }: { user: User }) {
@@ -93,9 +104,38 @@ export function SettingsClient({ user }: { user: User }) {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiTesting, setAiTesting] = useState(false);
 
+  // 定时同步状态
+  const [schedule, setSchedule] = useState<{
+    enabled: boolean;
+    cron: string;
+    lastRunAt: string | null;
+    lastStatus: string | null;
+    lastError: string | null;
+    nextRun: string | null;
+    timeZone: string;
+  }>({
+    enabled: false,
+    cron: "0 3 * * *",
+    lastRunAt: null,
+    lastStatus: null,
+    lastError: null,
+    nextRun: null,
+    timeZone: "UTC",
+  });
+  const [scheduleSaving, setScheduleSaving] = useState(false);
+  const [scheduleSyncing, setScheduleSyncing] = useState(false);
+
+  // 整理快照状态
+  const [snapshots, setSnapshots] = useState<SnapshotItem[]>([]);
+  const [snapshotsLoading, setSnapshotsLoading] = useState(false);
+  const [organizeClearing, setOrganizeClearing] = useState<string | null>(null);
+  const [restoringId, setRestoringId] = useState<string | null>(null);
+
   useEffect(() => {
     setPrefs(getPreferences());
     fetchAiConfig();
+    fetchSchedule();
+    fetchSnapshots();
   }, []);
 
   const fetchAiConfig = async () => {
@@ -394,6 +434,248 @@ export function SettingsClient({ user }: { user: User }) {
     });
   };
 
+  const fetchSchedule = async () => {
+    try {
+      const res = await fetch("/api/sync-schedule");
+      if (!res.ok) return;
+      const data = await res.json();
+      setSchedule({
+        enabled: Boolean(data.enabled),
+        cron: data.cron || "0 3 * * *",
+        lastRunAt: data.lastRunAt ?? null,
+        lastStatus: data.lastStatus ?? null,
+        lastError: data.lastError ?? null,
+        nextRun: data.nextRun ?? null,
+        timeZone: data.timeZone || "UTC",
+      });
+    } catch (error) {
+      console.error("Failed to fetch sync schedule:", error);
+    }
+  };
+
+  const fetchSnapshots = async () => {
+    setSnapshotsLoading(true);
+    try {
+      const res = await fetch("/api/organize/snapshots");
+      if (!res.ok) return;
+      const data = await res.json();
+      setSnapshots(Array.isArray(data.snapshots) ? data.snapshots : []);
+    } catch (error) {
+      console.error("Failed to fetch snapshots:", error);
+    } finally {
+      setSnapshotsLoading(false);
+    }
+  };
+
+  const handleSaveSchedule = async () => {
+    setScheduleSaving(true);
+    try {
+      const res = await fetch("/api/sync-schedule", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          enabled: schedule.enabled,
+          cron: schedule.cron,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setAlertMessage({
+          open: true,
+          title: t("operationFailed"),
+          message: `${t("schedInvalid")}: ${data.error || t("schedSaveFailed")}`,
+          variant: "error",
+        });
+        return;
+      }
+      setSchedule((prev) => ({
+        ...prev,
+        enabled: Boolean(data.enabled),
+        cron: data.cron || prev.cron,
+        nextRun: data.nextRun ?? null,
+        timeZone: data.timeZone || prev.timeZone,
+      }));
+      setAlertMessage({
+        open: true,
+        title: t("operationSuccess"),
+        message: t("schedSaved"),
+        variant: "success",
+      });
+    } catch (error) {
+      console.error("Save schedule error:", error);
+      setAlertMessage({
+        open: true,
+        title: t("operationFailed"),
+        message: t("schedSaveFailed"),
+        variant: "error",
+      });
+    } finally {
+      setScheduleSaving(false);
+    }
+  };
+
+  const handleSyncNow = async () => {
+    setScheduleSyncing(true);
+    try {
+      const res = await fetch("/api/sync-schedule/run", { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setAlertMessage({
+          open: true,
+          title: t("operationFailed"),
+          message: data.error || t("schedSyncFailed"),
+          variant: "error",
+        });
+        return;
+      }
+      setAlertMessage({
+        open: true,
+        title: t("operationSuccess"),
+        message: t("schedSynced", { count: data.count ?? 0 }),
+        variant: "success",
+      });
+      fetchSchedule();
+      fetchSnapshots();
+      router.refresh();
+    } catch (error) {
+      console.error("Sync now error:", error);
+      setAlertMessage({
+        open: true,
+        title: t("operationFailed"),
+        message: t("schedSyncFailed"),
+        variant: "error",
+      });
+    } finally {
+      setScheduleSyncing(false);
+    }
+  };
+
+  const handleOrganizeClear = (target: "all" | "lists" | "notes") => {
+    const targetLabel =
+      target === "lists"
+        ? t("orgTargetLists")
+        : target === "notes"
+          ? t("orgTargetNotes")
+          : t("orgTargetAll");
+    const title =
+      target === "lists"
+        ? t("orgClearLists")
+        : target === "notes"
+          ? t("orgClearNotes")
+          : t("orgClearAll");
+
+    setConfirmDialog({
+      open: true,
+      title,
+      description: t("orgClearConfirm", { target: targetLabel }),
+      variant: "destructive",
+      onConfirm: async () => {
+        setConfirmDialog({ ...confirmDialog, open: false });
+        setOrganizeClearing(target);
+        try {
+          const res = await fetch("/api/organize/clear", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ target }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            setAlertMessage({
+              open: true,
+              title: t("operationFailed"),
+              message: data.error || t("orgClearFailed"),
+              variant: "error",
+            });
+            return;
+          }
+          setAlertMessage({
+            open: true,
+            title: t("operationSuccess"),
+            message: t("orgCleared", { target: targetLabel }),
+            variant: "success",
+          });
+          fetchSnapshots();
+          router.refresh();
+        } catch (error) {
+          console.error("Organize clear error:", error);
+          setAlertMessage({
+            open: true,
+            title: t("operationFailed"),
+            message: t("orgClearFailed"),
+            variant: "error",
+          });
+        } finally {
+          setOrganizeClearing(null);
+        }
+      },
+    });
+  };
+
+  const handleRestore = (snapshotId?: string) => {
+    const target = snapshotId
+      ? snapshots.find((item) => item.id === snapshotId)
+      : snapshots[0];
+
+    if (!target) {
+      setAlertMessage({
+        open: true,
+        title: t("operationFailed"),
+        message: t("orgNoSnapshots"),
+        variant: "error",
+      });
+      return;
+    }
+
+    setConfirmDialog({
+      open: true,
+      title: t("orgRestoreLatest"),
+      description: t("orgRestoreConfirm", { label: target.label }),
+      variant: "destructive",
+      onConfirm: async () => {
+        setConfirmDialog({ ...confirmDialog, open: false });
+        setRestoringId(target.id);
+        try {
+          const res = await fetch("/api/organize/restore", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ snapshotId: target.id }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            setAlertMessage({
+              open: true,
+              title: t("operationFailed"),
+              message: data.error || t("orgRestoreFailed"),
+              variant: "error",
+            });
+            return;
+          }
+          setAlertMessage({
+            open: true,
+            title: t("operationSuccess"),
+            message: t("orgRestored", {
+              lists: data.restoredLists ?? 0,
+              notes: data.restoredNotes ?? 0,
+            }),
+            variant: "success",
+          });
+          fetchSnapshots();
+          router.refresh();
+        } catch (error) {
+          console.error("Restore snapshot error:", error);
+          setAlertMessage({
+            open: true,
+            title: t("operationFailed"),
+            message: t("orgRestoreFailed"),
+            variant: "error",
+          });
+        } finally {
+          setRestoringId(null);
+        }
+      },
+    });
+  };
+
   return (
     <div className="min-h-screen bg-background">
       <div className="container max-w-2xl py-8 mx-auto px-4">
@@ -655,6 +937,245 @@ export function SettingsClient({ user }: { user: User }) {
                   t("reset")
                 )}
               </Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Scheduled Sync */}
+        <Card className="mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Clock className="h-5 w-5" />
+              {t("schedTitle")}
+            </CardTitle>
+            <CardDescription>{t("schedDesc")}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <Label>{t("schedEnable")}</Label>
+                <p className="text-sm text-muted-foreground">
+                  {t("schedEnableDesc")}
+                </p>
+              </div>
+              <Switch
+                checked={schedule.enabled}
+                onCheckedChange={(checked) =>
+                  setSchedule((prev) => ({ ...prev, enabled: checked }))
+                }
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="cron-expression">{t("schedCron")}</Label>
+              <Input
+                id="cron-expression"
+                value={schedule.cron}
+                onChange={(event) =>
+                  setSchedule((prev) => ({ ...prev, cron: event.target.value }))
+                }
+                placeholder="0 0 3 * * ?"
+                className="font-mono"
+              />
+              <p className="text-xs text-muted-foreground">
+                {t("schedCronHelp")}
+              </p>
+            </div>
+
+            <div className="rounded-md border p-3 text-sm space-y-1">
+              <div className="flex justify-between gap-4">
+                <span className="text-muted-foreground">{t("schedNextRun")}</span>
+                <span className="truncate">
+                  {schedule.enabled && schedule.nextRun ? schedule.nextRun : "-"}
+                </span>
+              </div>
+              <div className="flex justify-between gap-4">
+                <span className="text-muted-foreground">{t("schedLastRun")}</span>
+                <span className="truncate">
+                  {schedule.lastRunAt || t("schedNeverRun")}
+                </span>
+              </div>
+              <div className="flex justify-between gap-4">
+                <span className="text-muted-foreground">
+                  {t("schedLastResult")}
+                </span>
+                <span
+                  className={`truncate ${
+                    schedule.lastStatus === "error" ? "text-destructive" : ""
+                  }`}
+                >
+                  {schedule.lastStatus === "success"
+                    ? t("schedLastSuccess")
+                    : schedule.lastStatus === "error"
+                      ? t("schedLastError", { error: schedule.lastError || "-" })
+                      : "-"}
+                </span>
+              </div>
+              <p className="text-xs text-muted-foreground pt-1">
+                {t("schedTimeZone", { zone: schedule.timeZone })}
+              </p>
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <Button onClick={handleSaveSchedule} disabled={scheduleSaving}>
+                {scheduleSaving ? (
+                  <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                ) : null}
+                {t("schedSave")}
+              </Button>
+              <Button
+                variant="outline"
+                onClick={handleSyncNow}
+                disabled={scheduleSyncing}
+              >
+                {scheduleSyncing ? (
+                  <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                ) : null}
+                {t("schedSyncNow")}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Organize & Restore */}
+        <Card className="mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <RotateCcw className="h-5 w-5" />
+              {t("orgTitle")}
+            </CardTitle>
+            <CardDescription>{t("orgDesc")}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <p className="font-medium">{t("orgClearAll")}</p>
+                <p className="text-sm text-muted-foreground">
+                  {t("orgClearAllDesc")}
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => handleOrganizeClear("all")}
+                disabled={organizeClearing !== null}
+              >
+                {organizeClearing === "all" ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  t("clear")
+                )}
+              </Button>
+            </div>
+
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <p className="font-medium">{t("orgClearLists")}</p>
+                <p className="text-sm text-muted-foreground">
+                  {t("orgClearListsDesc")}
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => handleOrganizeClear("lists")}
+                disabled={organizeClearing !== null}
+              >
+                {organizeClearing === "lists" ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  t("clear")
+                )}
+              </Button>
+            </div>
+
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <p className="font-medium">{t("orgClearNotes")}</p>
+                <p className="text-sm text-muted-foreground">
+                  {t("orgClearNotesDesc")}
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => handleOrganizeClear("notes")}
+                disabled={organizeClearing !== null}
+              >
+                {organizeClearing === "notes" ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  t("clear")
+                )}
+              </Button>
+            </div>
+
+            <div className="border-t pt-4 space-y-3">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <p className="font-medium">{t("orgRestoreLatest")}</p>
+                  <p className="text-sm text-muted-foreground">
+                    {t("orgRestoreDesc")}
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  onClick={() => handleRestore()}
+                  disabled={
+                    snapshotsLoading ||
+                    snapshots.length === 0 ||
+                    restoringId !== null
+                  }
+                >
+                  {restoringId !== null ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    t("orgRestore")
+                  )}
+                </Button>
+              </div>
+
+              {snapshotsLoading ? (
+                <p className="text-sm text-muted-foreground">
+                  {t("orgLoading")}
+                </p>
+              ) : snapshots.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  {t("orgNoSnapshots")}
+                </p>
+              ) : (
+                <ul className="space-y-2">
+                  {snapshots.map((snapshot) => (
+                    <li
+                      key={snapshot.id}
+                      className="flex items-center justify-between gap-3 rounded-md border p-2 text-sm"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate font-medium">{snapshot.label}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {t("orgSnapshotMeta", {
+                            lists: snapshot.listCount,
+                            notes: snapshot.noteCount,
+                            repos: snapshot.repoCount,
+                          })}
+                        </p>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleRestore(snapshot.id)}
+                        disabled={restoringId !== null}
+                      >
+                        {restoringId === snapshot.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          t("orgRestore")
+                        )}
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           </CardContent>
         </Card>

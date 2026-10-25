@@ -29,6 +29,8 @@ model User {
   notes         Note[]
   repositories  UserRepository[]
   aiConfig      AIConfig?
+  syncSchedule  SyncSchedule?
+  snapshots     OrganizeSnapshot[]
 
   accounts      Account[]
   sessions      Session[]
@@ -163,3 +165,35 @@ model AIConfig {
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
+
+// 定时同步配置：每个用户一条，cron 为 cron 表达式字符串
+model SyncSchedule {
+  id         String    @id @default(cuid())
+  userId     String    @unique
+  enabled    Boolean   @default(false)
+  cron       String    @default("0 3 * * *")
+  lastRunAt  DateTime?
+  lastStatus String?   // success | error
+  lastError  String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// 整理快照：清除 Lists 或笔记前自动保存，用于整体恢复
+model OrganizeSnapshot {
+  id        String   @id @default(cuid())
+  userId    String
+  label     String   // 触发原因，例如「清除所有 Lists」
+  payload   String   // JSON：列表及其包含的仓库、笔记内容
+  listCount Int      @default(0)
+  noteCount Int      @default(0)
+  repoCount Int      @default(0)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
