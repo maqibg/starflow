@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import prisma from "@/lib/prisma";
-import { formatDateTime, nextRunAfter, validateCron } from "@/lib/cron";
+import { formatDateTime, validateCron } from "@/lib/cron";
 
 const DEFAULT_CRON = "0 3 * * *";
 
@@ -20,7 +20,8 @@ export async function GET() {
     });
 
     const cron = schedule?.cron ?? DEFAULT_CRON;
-    const next = nextRunAfter(cron, new Date());
+    const validated = validateCron(cron);
+    const next = validated.ok ? validated.nextRun : null;
 
     return NextResponse.json({
       enabled: schedule?.enabled ?? false,
